@@ -1,72 +1,75 @@
-resource "aws_security_group" "sg" {
-  name        = "${var.name}-${var.env}-sg"
-  description = "Allow TLS inbound traffic and all outbound traffic"
-  vpc_id      = var.vpc_id
+resource "aws_vpc" "main" {
+  cidr_block = "10.0.0.0/16"
+  enable_dns_support = true
+  enable_dns_hostnames = true
+  tags = merge(var.tags, { Name = "${var.env}-vpc"})
+}
 
-  ingress {
+module "subnets" {
+  source = "./subnets"
+  for_each = var.subnets
+  vpc_id = aws_vpc.main.id
+  cidr_block = each.value["cidr_block"]
+  name =  each.value["name"]
+  azs = each.value["azs"]
+  tags =var.tags
+  env = var.env
+}
 
-  description = "APP"
-  from_port         = 8080
-  protocol       = "tcp"
-  to_port           = 8080
-  cidr_blocks = var.allow_app_cidr
+resource "aws_internet_gateway" "igw" {
+  vpc_id = aws_vpc.main.id
 
-  }
+  tags = merge(var.tags, { Name = "${var.env}-igw"})
+}
 
-   ingress {
+resource "aws_eip" "ngw" {
+  # count = length(lookup(lookup(var.subnets, "public", null), "cidr_block", 0))
+  count = length(var.subnets["public"].cidr_block)
+  tags = merge(var.tags, { Name = "${var.env}-ngw"})
+}
 
-  description = "SSH"
-  from_port         = 22
-  protocol       = "tcp"
-  to_port           = 22
-  cidr_blocks = var.bastion_cidr
+resource "aws_nat_gateway" "ngw" {
+  count = length(var.subnets["public"].cidr_block)
+  allocation_id = aws_eip.ngw[count.index].id
+  subnet_id     = module.subnets["public"].subnet_ids[count.index]
 
-  }
+  tags = merge(var.tags, { Name = "${var.env}-ngw"})
 
-  egress {
+#   # To ensure proper ordering, it is recommended to add an explicit dependency
+#   # on the Internet Gateway for the VPC.
+}
 
+resource "aws_route" "igw"{
+  count = length(module.subnets["public"].route_table_ids)
+  route_table_id = module.subnets["public"].route_table_ids[count.index]
+  gateway_id =  aws_internet_gateway.igw.id
+  destination_cidr_block = "0.0.0.0/0"
+}
+
+resource "aws_route" "ngw"{
+  count = length(local.all_private_subnet_ids)
+  route_table_id = local.all_private_subnet_ids[count.index]
+  nat_gateway_id =  element(aws_nat_gateway.ngw.*.id, count.index)
+  destination_cidr_block = "0.0.0.0/0"
+}
+
+resource "aws_vpc_peering_connection" "peer" {
   
-  from_port         = 0
-  protocol       = "-1"
-  to_port           = 0
-  cidr_blocks = ["0.0.0.0/0"]
-  ipv6_cidr_blocks = ["::/0"]
-
-
-  }
-
-  tags = {
-    Name = "${var.name}-${var.env}-sg"
-  }
+  peer_vpc_id   = var.default_vpc_id
+  vpc_id        = aws_vpc.main.id
+  auto_accept = true
 }
 
 
-resource "aws_launch_template" "template" {
-  name_prefix   = "${var.name}-${var.env}-lt"
-  image_id      = data.aws_ami.ami.id
-  instance_type = var.instance_type
-  vpc_security_group_ids = [aws_security_group.sg.id]
+resource "aws_route" "peering-connection-route"{
+  count = length(module.subnets["public"].route_table_ids)
+  route_table_id = module.subnets["public"].route_table_ids[count.index]
+  vpc_peering_connection_id = aws_vpc_peering_connection.peer.id
+  destination_cidr_block = var.default_vpc_cidr
 }
 
-resource "aws_autoscaling_group" "asg" {
-  name = "${var.name}-${var.env}-asg"
-  desired_capacity   = var.desired_capacity
-  max_size           = var.max_size
-  min_size           = var.min_size
-  vpc_zone_identifier = var.subnet_ids
-
-  launch_template {
-    id      = aws_launch_template.template.id
-    version = "$Latest"
-  }
-
-  
-  dynamic "tag" {
-    for_each = local.asg_tags
-    content {
-      key                 = tag.key
-      propagate_at_launch = true
-      value               = tag.value
-    }
-  }
+resource "aws_route" "peering-connection-route-in-default-vpc"{
+  route_table_id = var.default_vpc_rtid
+  vpc_peering_connection_id = aws_vpc_peering_connection.peer.id
+  destination_cidr_block = var.cidr_block
 }

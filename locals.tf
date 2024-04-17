@@ -1,4 +1,3 @@
-locals { 
-    asg_tags = merge(var.tags, {Name= "${var.name}-${var.env}-ngw"})
-    dynamic_asg_tags = [ for k,v in local.asg_tags: tomap({key=k, value = v})]
+locals {
+   all_private_subnet_ids = concat(module.subnets["db"].route_table_ids,module.subnets["app"].route_table_ids,module.subnets["web"].route_table_ids)
 }
